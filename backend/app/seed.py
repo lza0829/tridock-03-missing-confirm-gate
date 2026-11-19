@@ -1,4 +1,5 @@
 from __future__ import annotations
+import sqlite3
 from app.db import connect
 
 SCHEMA = '''
@@ -19,7 +20,11 @@ CREATE TABLE IF NOT EXISTS expect_lines (
   dock_day TEXT NOT NULL,
   qty REAL NOT NULL,
   note TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  voided INTEGER NOT NULL DEFAULT 0,
+  voided_at TEXT,
+  voided_by TEXT,
+  void_reason TEXT
 );
 CREATE TABLE IF NOT EXISTS receive_lines (
   id INTEGER PRIMARY KEY,
@@ -30,7 +35,11 @@ CREATE TABLE IF NOT EXISTS receive_lines (
   qty REAL NOT NULL,
   occurred_at TEXT NOT NULL,
   note TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  voided INTEGER NOT NULL DEFAULT 0,
+  voided_at TEXT,
+  voided_by TEXT,
+  void_reason TEXT
 );
 CREATE TABLE IF NOT EXISTS confirm_lines (
   id INTEGER PRIMARY KEY,
@@ -40,7 +49,11 @@ CREATE TABLE IF NOT EXISTS confirm_lines (
   dock_day TEXT NOT NULL,
   qty REAL NOT NULL,
   note TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  voided INTEGER NOT NULL DEFAULT 0,
+  voided_at TEXT,
+  voided_by TEXT,
+  void_reason TEXT
 );
 CREATE TABLE IF NOT EXISTS reconcile_batches (
   id INTEGER PRIMARY KEY,
@@ -50,7 +63,8 @@ CREATE TABLE IF NOT EXISTS reconcile_batches (
   variance_count INTEGER NOT NULL,
   status TEXT NOT NULL,
   sealed_at TEXT,
-  note TEXT
+  note TEXT,
+  void_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS match_rows (
   id INTEGER PRIMARY KEY,
@@ -75,6 +89,19 @@ CREATE TABLE IF NOT EXISTS variance_rows (
   fate TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS void_audit (
+  id INTEGER PRIMARY KEY,
+  leg TEXT NOT NULL,
+  line_id INTEGER NOT NULL,
+  doc_no TEXT NOT NULL,
+  supplier_code TEXT NOT NULL,
+  sku TEXT NOT NULL,
+  dock_day TEXT NOT NULL,
+  qty REAL NOT NULL,
+  operator TEXT NOT NULL,
+  reason TEXT,
+  created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS late_spill (
   id INTEGER PRIMARY KEY,
   dock_day TEXT NOT NULL,
@@ -87,12 +114,48 @@ CREATE TABLE IF NOT EXISTS reopen_requests (
 );
 '''
 
+# 软作废迁移：老库补列。SQLite 不支持 ADD COLUMN IF NOT EXISTS，逐列探测。
+_COLUMN_MIGRATIONS = {
+    "expect_lines": [
+        "voided INTEGER NOT NULL DEFAULT 0",
+        "voided_at TEXT",
+        "voided_by TEXT",
+        "void_reason TEXT",
+    ],
+    "receive_lines": [
+        "voided INTEGER NOT NULL DEFAULT 0",
+        "voided_at TEXT",
+        "voided_by TEXT",
+        "void_reason TEXT",
+    ],
+    "confirm_lines": [
+        "voided INTEGER NOT NULL DEFAULT 0",
+        "voided_at TEXT",
+        "voided_by TEXT",
+        "void_reason TEXT",
+    ],
+    "reconcile_batches": [
+        "void_count INTEGER NOT NULL DEFAULT 0",
+    ],
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, columns in _COLUMN_MIGRATIONS.items():
+        existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        for col in columns:
+            name = col.split()[0]
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
+
 
 def seed_if_empty() -> None:
     conn = connect()
     try:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         if conn.execute("SELECT COUNT(*) c FROM suppliers").fetchone()["c"]:
+            conn.commit()
             return
         conn.execute("INSERT INTO settings(key, value) VALUES ('dock_day', ?)", ("2026-11-18",))
         suppliers = [
